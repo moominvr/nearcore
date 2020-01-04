@@ -41,10 +41,8 @@ pub struct BlockHeaderInnerRest {
     pub chunk_tx_root: MerkleHash,
     /// Number of chunks included into the block.
     pub chunks_included: u64,
-    /// Total weight.
-    pub total_weight: Weight,
     /// Score.
-    pub score: Weight,
+    pub score: BlockScore,
     /// Validator proposals.
     pub validator_proposals: Vec<ValidatorStake>,
     /// Mask for new chunks included in the block
@@ -101,8 +99,7 @@ impl BlockHeaderInnerRest {
         chunk_headers_root: MerkleHash,
         chunk_tx_root: MerkleHash,
         chunks_included: u64,
-        total_weight: Weight,
-        score: Weight,
+        score: BlockScore,
         validator_proposals: Vec<ValidatorStake>,
         chunk_mask: Vec<bool>,
         gas_price: Balance,
@@ -119,7 +116,6 @@ impl BlockHeaderInnerRest {
             chunk_headers_root,
             chunk_tx_root,
             chunks_included,
-            total_weight,
             score,
             validator_proposals,
             chunk_mask,
@@ -132,10 +128,6 @@ impl BlockHeaderInnerRest {
             last_quorum_pre_commit,
             approvals,
         }
-    }
-
-    pub fn weight_and_score(&self) -> WeightAndScore {
-        WeightAndScore { weight: self.total_weight, score: self.score }
     }
 
     pub fn hash(&self) -> CryptoHash {
@@ -244,8 +236,7 @@ impl BlockHeader {
         outcome_root: MerkleHash,
         timestamp: u64,
         chunks_included: u64,
-        total_weight: Weight,
-        score: Weight,
+        score: BlockScore,
         validator_proposals: Vec<ValidatorStake>,
         chunk_mask: Vec<bool>,
         epoch_id: EpochId,
@@ -275,7 +266,6 @@ impl BlockHeader {
             chunk_headers_root,
             chunk_tx_root,
             chunks_included,
-            total_weight,
             score,
             validator_proposals,
             chunk_mask,
@@ -318,7 +308,6 @@ impl BlockHeader {
             chunk_tx_root,
             chunks_included,
             0.into(),
-            0.into(),
             vec![],
             vec![],
             initial_gas_price,
@@ -355,6 +344,10 @@ impl BlockHeader {
 
     pub fn num_approvals(&self) -> u64 {
         self.inner_rest.approvals.len() as u64
+    }
+
+    pub fn score_and_height(&self) -> ScoreAndHeight {
+        ScoreAndHeight { score: self.inner_rest.score, height: self.inner_lite.height }
     }
 }
 
@@ -439,7 +432,7 @@ impl Block {
         challenges_result: ChallengesResult,
         challenges: Challenges,
         signer: &dyn Signer,
-        score: Weight,
+        score: BlockScore,
         last_quorum_pre_vote: CryptoHash,
         last_quorum_pre_commit: CryptoHash,
         next_bp_hash: CryptoHash,
@@ -477,8 +470,6 @@ impl Block {
         let new_total_supply =
             prev.inner_rest.total_supply + inflation.unwrap_or(0) - balance_burnt;
 
-        let num_approvals: u128 = approvals.len() as u128;
-        let total_weight = prev.inner_rest.total_weight.next(num_approvals);
         let now = to_timestamp(Utc::now());
         let time =
             if now <= prev.inner_lite.timestamp { prev.inner_lite.timestamp + 1 } else { now };
@@ -494,7 +485,6 @@ impl Block {
                 Block::compute_outcome_root(&chunks),
                 time,
                 Block::compute_chunks_included(&chunks, height),
-                total_weight,
                 score,
                 validator_proposals,
                 chunk_mask,
@@ -663,72 +653,69 @@ impl Block {
     }
 }
 
-/// The weight is defined as the number of unique validators approving this fork.
+/// The score is defined as the height of the last block with quorum pre-vote
+/// We have a separate type to ensure that the height is never assigned to score and vice versa
 #[derive(
     BorshSerialize, BorshDeserialize, Debug, Clone, Copy, PartialEq, PartialOrd, Eq, Ord, Default,
 )]
-pub struct Weight {
-    num: u128,
+pub struct BlockScore {
+    num: u64,
 }
 
 #[derive(BorshSerialize, BorshDeserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct WeightAndScore {
-    pub weight: Weight,
-    pub score: Weight,
+pub struct ScoreAndHeight {
+    pub score: BlockScore,
+    pub height: BlockHeight,
 }
 
-impl Weight {
-    pub fn to_num(self) -> u128 {
+impl BlockScore {
+    pub fn to_num(self) -> u64 {
         self.num
     }
+}
 
-    pub fn next(self, num: u128) -> Self {
-        Weight { num: self.num + num + 1 }
+impl From<u64> for BlockScore {
+    fn from(num: u64) -> Self {
+        BlockScore { num }
     }
 }
 
-impl From<u128> for Weight {
-    fn from(num: u128) -> Self {
-        Weight { num }
-    }
-}
-
-impl std::fmt::Display for Weight {
+impl std::fmt::Display for BlockScore {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         write!(f, "{}", self.num)
     }
 }
 
-impl WeightAndScore {
-    pub fn from_ints(weight: u128, score: u128) -> Self {
-        Self { weight: weight.into(), score: score.into() }
+impl ScoreAndHeight {
+    pub fn from_ints(score: u64, height: u64) -> Self {
+        Self { score: score.into(), height: height }
     }
 
-    /// Returns whether one chain is `threshold` weight ahead of the other, where "ahead" is loosely
+    /// Returns whether one chain is `threshold` heights ahead of the other, where "ahead" is loosely
     /// defined as either having the score exceeding by the `threshold` (finality gadget is working
     /// fine, and the last reported final block is way ahead of the last known to us), or having the
-    /// same score, but the weight exceeding by the `threshold` (finality gadget is down, and the
-    /// canonical chain is has significantly higher weight)
-    pub fn beyond_threshold(&self, other: &WeightAndScore, threshold: u128) -> bool {
+    /// same score, but the height exceeding by the `threshold` (finality gadget is down, and the
+    /// canonical chain is has significantly higher height)
+    pub fn beyond_threshold(&self, other: &ScoreAndHeight, threshold: u64) -> bool {
         if self.score == other.score {
-            self.weight.to_num() > other.weight.to_num() + threshold
+            self.height > other.height + threshold
         } else {
             self.score.to_num() > other.score.to_num() + threshold
         }
     }
 }
 
-impl PartialOrd for WeightAndScore {
-    fn partial_cmp(&self, other: &WeightAndScore) -> Option<Ordering> {
+impl PartialOrd for ScoreAndHeight {
+    fn partial_cmp(&self, other: &ScoreAndHeight) -> Option<Ordering> {
         Some(self.cmp(other))
     }
 }
 
-impl Ord for WeightAndScore {
-    fn cmp(&self, other: &WeightAndScore) -> Ordering {
+impl Ord for ScoreAndHeight {
+    fn cmp(&self, other: &ScoreAndHeight) -> Ordering {
         match self.score.cmp(&other.score) {
             v @ Ordering::Less | v @ Ordering::Greater => v,
-            Ordering::Equal => self.weight.cmp(&other.weight),
+            Ordering::Equal => self.height.cmp(&other.height),
         }
     }
 }
