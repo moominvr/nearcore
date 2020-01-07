@@ -33,6 +33,7 @@ pytest stress/network_stress.py
 
 # python adversarial tests
 pytest adversarial/wrong_sync_info.py
+pytest adversarial/malicious_chain_test.py
 
 # catchup tests
 expensive near-client catching_up tests::test_catchup_receipts_sync_third_epoch
